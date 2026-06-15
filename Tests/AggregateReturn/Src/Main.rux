@@ -1,0 +1,31 @@
+func divide(a: int, b: int) -> (int, bool) {
+    if b == 0 {
+        return (0, false);
+    }
+    return (a / b, true);
+}
+
+struct Box {
+    data: *opaque;
+    length: uint;
+    capacity: uint;
+}
+
+extend Box {
+    func New() -> Box {
+        return Box { data: null, length: 0, capacity: 0 };
+    }
+}
+
+func Main() -> int32 {
+    let (result, ok) = divide(10, 0);
+    if ok { return 1i32; }
+    if result != 0 { return 2i32; }
+
+    let b = Box::New();
+    if b.length != 0 { return 3i32; }
+    if b.capacity != 0 { return 4i32; }
+    if (b.data as int64) != 0i64 { return 5i32; }
+
+    return 0i32;
+}

@@ -1476,7 +1476,7 @@ namespace Rux {
             }
 
             [[nodiscard]] bool IsWin64ByRefAggregate(const TypeRef& t) const {
-                return SizeOfRuntime(t) == 16;
+                return SizeOfRuntime(t) > 8;
             }
 
             [[nodiscard]] bool IsWin64AddressParam(const TypeRef& t) const {
@@ -1867,13 +1867,171 @@ namespace Rux {
                 }
             }
 
+            void LoadFromR10(const int32_t off, const int size) const {
+                if (size == 8) {
+                    enc.Byte(0x49);
+                    enc.Byte(0x8B);
+                    enc.Byte(0x82);
+                    enc.Dword(static_cast<uint32_t>(off)); // mov rax, [r10+off]
+                }
+                else if (size == 4) {
+                    enc.Byte(0x41);
+                    enc.Byte(0x8B);
+                    enc.Byte(0x82);
+                    enc.Dword(static_cast<uint32_t>(off)); // mov eax, [r10+off]
+                }
+                else if (size == 2) {
+                    enc.Byte(0x41);
+                    enc.Byte(0x0F);
+                    enc.Byte(0xB7);
+                    enc.Byte(0x82);
+                    enc.Dword(static_cast<uint32_t>(off)); // movzx eax, word [r10+off]
+                }
+                else {
+                    enc.Byte(0x41);
+                    enc.Byte(0x0F);
+                    enc.Byte(0xB6);
+                    enc.Byte(0x82);
+                    enc.Dword(static_cast<uint32_t>(off)); // movzx eax, byte [r10+off]
+                }
+            }
+
+            void StoreToR11(const int32_t off, const int size) const {
+                if (size == 8) {
+                    enc.Byte(0x49);
+                    enc.Byte(0x89);
+                    enc.Byte(0x83);
+                    enc.Dword(static_cast<uint32_t>(off)); // mov [r11+off], rax
+                }
+                else if (size == 4) {
+                    enc.Byte(0x41);
+                    enc.Byte(0x89);
+                    enc.Byte(0x83);
+                    enc.Dword(static_cast<uint32_t>(off)); // mov [r11+off], eax
+                }
+                else if (size == 2) {
+                    enc.Byte(0x66);
+                    enc.Byte(0x41);
+                    enc.Byte(0x89);
+                    enc.Byte(0x83);
+                    enc.Dword(static_cast<uint32_t>(off)); // mov [r11+off], ax
+                }
+                else {
+                    enc.Byte(0x41);
+                    enc.Byte(0x88);
+                    enc.Byte(0x83);
+                    enc.Dword(static_cast<uint32_t>(off)); // mov [r11+off], al
+                }
+            }
+
+            void LoadFromStack(const int32_t off, const int size) const {
+                if (size == 8) {
+                    enc.MovRaxLoad(off);
+                }
+                else if (size == 4) {
+                    enc.MovEaxLoad(off);
+                }
+                else if (size == 2) {
+                    enc.MovzxRaxWord(off);
+                }
+                else {
+                    enc.MovzxRaxByte(off);
+                }
+            }
+
+            void StoreToStack(const int32_t off, const int size) const {
+                if (size == 8) {
+                    enc.MovRaxStore(off);
+                }
+                else if (size == 4) {
+                    enc.MovEaxStore(off);
+                }
+                else if (size == 2) {
+                    enc.MovAxStore(off);
+                }
+                else {
+                    enc.MovAlStore(off);
+                }
+            }
+
+            template <typename LoadFn, typename StoreFn>
+            void CopyBytes(int byteCount, LoadFn load, StoreFn store) const {
+                int off = 0;
+                while (byteCount - off >= 8) {
+                    load(off, 8);
+                    store(off, 8);
+                    off += 8;
+                }
+                if (byteCount - off >= 4) {
+                    load(off, 4);
+                    store(off, 4);
+                    off += 4;
+                }
+                if (byteCount - off >= 2) {
+                    load(off, 2);
+                    store(off, 2);
+                    off += 2;
+                }
+                if (byteCount - off == 1) {
+                    load(off, 1);
+                    store(off, 1);
+                }
+            }
+
+            bool IsPointerTo(const LirReg reg, const TypeRef& t) const {
+                auto it = regTypes.find(reg);
+                return it != regTypes.end() &&
+                       it->second.kind == TypeRef::Kind::Pointer &&
+                       !it->second.inner.empty() && it->second.inner[0] == t;
+            }
+
+            void CopyValueToR11(const LirReg src, const TypeRef& t) const {
+                const int bytes = SizeOfRuntime(t);
+                if (IsPointerTo(src, t)) {
+                    enc.MovR10Load(Disp(src));
+                    CopyBytes(
+                        bytes,
+                        [this](int off, int size) { LoadFromR10(off, size); },
+                        [this](int off, int size) { StoreToR11(off, size); });
+                    return;
+                }
+                const int32_t srcDisp = Disp(src);
+                CopyBytes(
+                    bytes,
+                    [this, srcDisp](int off, int size) {
+                        LoadFromStack(srcDisp + off, size);
+                    },
+                    [this](int off, int size) { StoreToR11(off, size); });
+            }
+
+            void CopyR10ToStack(const LirReg dst, const TypeRef& t) const {
+                const int bytes = SizeOfRuntime(t);
+                const int32_t dstDisp = Disp(dst);
+                CopyBytes(
+                    bytes,
+                    [this](int off, int size) { LoadFromR10(off, size); },
+                    [this, dstDisp](int off, int size) {
+                        StoreToStack(dstDisp + off, size);
+                    });
+            }
+
             void LoadReturnValue(const LirReg reg, const TypeRef& t) const {
                 if (SizeOfRuntime(t) == 16) {
-                    enc.MovRaxLoad(Disp(reg));
-                    enc.MovR10Load(Disp(reg) + 8);
-                    enc.Byte(0x4C);
-                    enc.Byte(0x89);
-                    enc.Byte(0xD2); // mov rdx, r10
+                    if (IsPointerTo(reg, t)) {
+                        enc.MovR10Load(Disp(reg));
+                        LoadFromR10(0, 8);
+                        enc.Byte(0x49);
+                        enc.Byte(0x8B);
+                        enc.Byte(0x52);
+                        enc.Byte(0x08); // mov rdx, [r10 + 8]
+                    }
+                    else {
+                        enc.MovRaxLoad(Disp(reg));
+                        enc.MovR10Load(Disp(reg) + 8);
+                        enc.Byte(0x4C);
+                        enc.Byte(0x89);
+                        enc.Byte(0xD2); // mov rdx, r10
+                    }
                     return;
                 }
                 LoadA(reg, t);
@@ -1894,20 +2052,12 @@ namespace Rux {
 
             void StoreHiddenReturnValue(const LirReg src,
                                         const TypeRef& t) const {
-                if (hiddenReturnOff == 0 || SizeOfRuntime(t) != 16) {
+                if (hiddenReturnOff == 0 || !IsWin64ByRefAggregate(t)) {
                     LoadReturnValue(src, t);
                     return;
                 }
                 enc.MovR11Load(-hiddenReturnOff);
-                enc.MovRaxLoad(Disp(src));
-                enc.Byte(0x49);
-                enc.Byte(0x89);
-                enc.Byte(0x03); // mov [r11], rax
-                enc.MovRaxLoad(Disp(src) + 8);
-                enc.Byte(0x49);
-                enc.Byte(0x89);
-                enc.Byte(0x43);
-                enc.Byte(0x08); // mov [r11 + 8], rax
+                CopyValueToR11(src, t);
                 enc.Byte(0x4C);
                 enc.Byte(0x89);
                 enc.Byte(0xD8); // mov rax, r11
@@ -2326,16 +2476,8 @@ namespace Rux {
                     else {
                         LirReg ptr = instr.srcs[0];
                         enc.MovR10Load(Disp(ptr));
-                        if (runtimeSz == 16) {
-                            enc.Byte(0x49);
-                            enc.Byte(0x8B);
-                            enc.Byte(0x02); // mov rax, [r10]
-                            enc.MovRaxStore(Disp(instr.dst));
-                            enc.Byte(0x49);
-                            enc.Byte(0x8B);
-                            enc.Byte(0x42);
-                            enc.Byte(0x08); // mov rax, [r10 + 8]
-                            enc.MovRaxStore(Disp(instr.dst) + 8);
+                        if (runtimeSz > 8) {
+                            CopyR10ToStack(instr.dst, t);
                             break;
                         }
                         // Load through pointer: use r10 as base
@@ -2414,16 +2556,8 @@ namespace Rux {
                     int sz = SizeOf(t);
                     int runtimeSz = SizeOfRuntime(t);
                     enc.MovR11Load(Disp(ptr));
-                    if (runtimeSz == 16) {
-                        enc.MovRaxLoad(Disp(val));
-                        enc.Byte(0x49);
-                        enc.Byte(0x89);
-                        enc.Byte(0x03); // mov [r11], rax
-                        enc.MovRaxLoad(Disp(val) + 8);
-                        enc.Byte(0x49);
-                        enc.Byte(0x89);
-                        enc.Byte(0x43);
-                        enc.Byte(0x08); // mov [r11 + 8], rax
+                    if (runtimeSz > 8) {
+                        CopyValueToR11(val, t);
                         break;
                     }
                     if (IsFloat(t)) {
@@ -3107,15 +3241,7 @@ namespace Rux {
                             }
                             else if (IsWin64ByRefAggregate(p.type)) {
                                 enc.MovR10Load(stackArgOff);
-                                enc.Byte(0x49);
-                                enc.Byte(0x8B);
-                                enc.Byte(0x02); // mov rax, [r10]
-                                enc.MovRaxStore(d);
-                                enc.Byte(0x49);
-                                enc.Byte(0x8B);
-                                enc.Byte(0x42);
-                                enc.Byte(0x08); // mov rax, [r10 + 8]
-                                enc.MovRaxStore(d + 8);
+                                CopyR10ToStack(p.reg, p.type);
                             }
                             else if (IsFloat(p.type)) {
                                 if (sz == 4) {
@@ -3140,15 +3266,7 @@ namespace Rux {
                         }
                         else if (IsWin64ByRefAggregate(p.type)) {
                             enc.MovR10ArgWin64(win64Idx);
-                            enc.Byte(0x49);
-                            enc.Byte(0x8B);
-                            enc.Byte(0x02); // mov rax, [r10]
-                            enc.MovRaxStore(d);
-                            enc.Byte(0x49);
-                            enc.Byte(0x8B);
-                            enc.Byte(0x42);
-                            enc.Byte(0x08); // mov rax, [r10 + 8]
-                            enc.MovRaxStore(d + 8);
+                            CopyR10ToStack(p.reg, p.type);
                         }
                         else if (IsFloat(p.type)) {
                             // MOVSS/MOVSD [rbp+d], xmmN
